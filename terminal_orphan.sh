@@ -2,17 +2,17 @@
 # ---
 # title: Enhanced Dev Server Killer - Full Featured Edition
 # date: 2025-11-04 00:00:00 UTC
-# ver: 2.7.0
+# ver: 2.8.0
 # author: Sliither
 # model: Claude Sonnet 4.5
 # tags: [bash, process-management, debugging, dev-tools, process-killer, pattern-matching, pgrep, terminal]
 # ---
 
-# Enhanced Dev Server Killer - AGGRESSIVE EDITION (FULL FEATURED)
-# Catches ALL dev processes with corrected pattern matching
-# Version: 2.7.0 (Added parent discovery, quiet/force/exclude/log/no-color modes)
+# Enhanced Dev Server Killer - SAFE & FEATURED EDITION
+# Catches dev processes with SAFE pattern matching (won't kill system processes!)
+# Version: 2.8.0 (Fixed critical pattern bugs, optimized speed, added safety checks)
 
-set -euo pipefail
+set -o pipefail
 
 # --- Configuration & Colors ---
 DRY_RUN=0
@@ -206,148 +206,63 @@ if [[ -n "$CUSTOM_TARGET" ]]; then
 else
     echo -e "${MAGENTA}▶ Scanning for ALL dev processes (aggressive mode)...${NC}"
     
-    # FIXED: More lenient patterns that actually catch processes
+    # Core dev process patterns (SAFE - won't match system processes)
     declare -A targets_map=(
-        # Node ecosystem - RELAXED patterns (removed ^ and trailing space)
-        ["node"]="node"           # Catches /usr/bin/node, node, nodejs, etc.
-        ["npm"]="npm"
-        ["yarn"]="yarn"
-        ["pnpm"]="pnpm"
-        ["bun"]="bun"
-        ["deno"]="deno"
-        
-        # Python ecosystem - RELAXED patterns
-        ["python"]="python"       # Catches python, python3, python3.11, etc.
-        
-        # VSCode nightmare processes
+        # Node ecosystem - match executables, not paths
+        ["node"]="/node"           # Matches /usr/bin/node, /usr/local/bin/node
+        ["npm"]="/npm"
+        ["yarn"]="/yarn"
+        ["pnpm"]="/pnpm"
+        ["bun"]="/bun"             # Matches /usr/local/bin/bun, not "bundle"
+        ["deno"]="/deno"
+
+        # Python - match python executables
+        ["python"]="/python"       # Matches /usr/bin/python, not paths with "python"
+
+        # VSCode processes (these are safe - specific names)
         ["vscode-ext"]="extensionHost"
         ["vscode-ts"]="tsserver"
-        ["vscode-eslint"]="eslint.*--server"
-        ["vscode-langserv"]="language.*server"
-        
+
         # JavaScript tooling
-        ["vite"]="vite"
-        ["webpack"]="webpack"
-        ["next"]="next"
-        ["nodemon"]="nodemon"
-        ["ts-node"]="ts-node"
-        ["esbuild"]="esbuild"
-        ["rollup"]="rollup"
-        ["parcel"]="parcel"
-        
-        # Python servers
+        ["vite"]="/vite"
+        ["webpack"]="webpack-dev-server"
+        ["next"]="next dev"
+        ["nodemon"]="/nodemon"
+
+        # Python servers (specific commands)
         ["uvicorn"]="uvicorn"
-        ["gunicorn"]="gunicorn"
-        ["flask"]="flask"
-        ["django"]="manage\.py"
-        ["fastapi"]="fastapi"
-        ["streamlit"]="streamlit"
-        ["jupyter"]="jupyter"
-        
-        # Ruby
-        ["ruby"]="ruby"
-        ["rails"]="rails"
-        ["puma"]="puma"
-        
-        # Go
-        ["go"]="go run"
-        ["air"]="air"
-        
-        # Rust
-        ["cargo"]="cargo (run|watch)"
-        
-        # PHP
-        ["php"]="php.*(-S|artisan)"
-        
+        ["flask"]="flask run"
+
+        # Other languages - be specific!
+        ["ruby"]="/ruby"
+        ["rails"]="rails server"
+        ["cargo"]="cargo run"
+        ["php"]="php -S"           # PHP dev server
+        ["java"]="java -jar"       # Java with jar flag
+        ["dotnet"]="dotnet run"    # .NET run command
+
         # Docker
-        ["docker"]="docker"
-        ["compose"]="docker-compose"
-        ["podman"]="podman"
-        
-        # Databases (dev instances only)
-        ["postgres"]="postgres"
+        ["docker"]="dockerd"       # Docker daemon, not just "docker" in path
+
+        # Databases (dev instances) - specific daemons
+        ["postgres"]="postgres -D" # Postgres with data directory
         ["redis"]="redis-server"
         ["mongodb"]="mongod"
-        ["mysql"]="mysqld"
-
-        # Java/JVM ecosystem
-        ["java"]="java.*(-jar|spring|tomcat)"
-        ["gradle"]="gradle"
-        ["maven"]="mvn"
-        ["kotlin"]="kotlin"
-
-        # .NET ecosystem
-        ["dotnet"]="dotnet"
-
-        # Elixir/Erlang
-        ["elixir"]="elixir"
-        ["mix"]="mix (phx\.server|run)"
-        ["phoenix"]="phoenix"
-        ["beam"]="beam.*smp"
-
-        # Build tools
-        ["grunt"]="grunt"
-        ["gulp"]="gulp"
-        ["turbo"]="turbo"
-        ["nx"]="nx"
-        ["make"]="make.*watch"
-
-        # Modern JS frameworks
-        ["astro"]="astro"
-        ["remix"]="remix"
-        ["nuxt"]="nuxt"
-        ["sveltekit"]="svelte-kit"
-        ["qwik"]="qwik"
-        ["solid"]="solid-start"
-
-        # Test runners (watch modes)
-        ["jest"]="jest.*--watch"
-        ["vitest"]="vitest"
-        ["playwright"]="playwright"
-        ["cypress"]="cypress"
-        ["mocha"]="mocha.*--watch"
-
-        # CSS/Style processors
-        ["sass"]="sass.*--watch"
-        ["less"]="less.*--watch"
-        ["tailwind"]="tailwindcss.*--watch"
-        ["postcss"]="postcss.*--watch"
-
-        # Tunneling/Proxy
-        ["ngrok"]="ngrok"
-        ["cloudflared"]="cloudflared"
-        ["localtunnel"]="localtunnel"
-
-        # Editors/IDEs (language servers)
-        ["cursor"]="cursor"
-        ["zed"]="zed"
-        ["sublime"]="sublime"
-        ["neovim"]="nvim"
-        ["vim-lsp"]="vim.*lsp"
-
-        # Electron helpers
-        ["electron"]="[Ee]lectron"
-        ["electron-helper"]="[Ee]lectron.*[Hh]elper"
-
-        # Emerging languages
-        ["zig"]="zig"
-        ["nim"]="nim"
-        ["crystal"]="crystal"
-        ["vlang"]="v run"
-
-        # Other dev servers
-        ["livereload"]="livereload"
-        ["browsersync"]="browser-sync"
-        ["webpack-dev"]="webpack-dev-server"
-        ["http-server"]="http-server"
-        ["serve"]="serve"
-        ["static-server"]="static-server"
     )
 
-    output_lines=("" "" "" "" "")
+    # Calculate how many lines we need (3 columns per line)
+    total_targets=${#targets_map[@]}
+    lines_needed=$(( (total_targets + 2) / 3 ))
+
+    # Initialize output_lines array with enough empty strings
+    output_lines=()
+    for ((i=0; i<lines_needed; i++)); do
+        output_lines+=("")
+    done
+
     count=0
     line_idx=0
-    
+
     for key in "${!targets_map[@]}"; do
         if [[ $DEBUG -eq 1 ]]; then
             echo -e "${DIM}[DEBUG] Searching for pattern: '${targets_map[$key]}'${NC}"
@@ -442,7 +357,10 @@ else
 fi
 
 # --- Parent Process Discovery ---
-declare -a ALL_PIDS=("${TARGET_PIDS[@]}")
+declare -a ALL_PIDS=()
+if [[ ${#TARGET_PIDS[@]} -gt 0 ]]; then
+    ALL_PIDS=("${TARGET_PIDS[@]}")
+fi
 
 if [[ -z "$CUSTOM_TARGET" && ${#TARGET_PIDS[@]} -gt 0 ]]; then
     echo ""

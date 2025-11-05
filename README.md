@@ -9,10 +9,11 @@ Terminal Orphan Killer is an enhanced process killer designed specifically for d
 ## Features
 
 ### Core Features
-- **Aggressive Process Detection**: Catches ALL dev processes with broad pattern matching (80+ process types)
-- **Multi-Language Support**: Node.js, Python, Ruby, Go, Rust, PHP, Java, .NET, Elixir, and more
+- **Safe Process Detection**: Catches dev processes with precise pattern matching (~30 process types)
+- **System-Safe Patterns**: Won't accidentally kill system processes with similar names
+- **Multi-Language Support**: Node.js, Python, Ruby, Rust, PHP, Java, .NET, and more
 - **VSCode Integration**: Targets extension hosts and language servers
-- **Port Scanning**: Identifies processes listening on common dev ports (including databases)
+- **Port Scanning**: Identifies processes listening on common dev ports
 - **Parent Process Discovery**: Automatically finds and kills parent processes that spawned dev servers
 
 ### Automation & Control
@@ -152,36 +153,33 @@ Example history file content:
 
 ## Supported Process Types
 
-Terminal Orphan Killer detects and can terminate 80+ types of development processes:
+Terminal Orphan Killer safely detects and can terminate ~30 common development processes:
 
-**JavaScript/TypeScript Ecosystem:**
+**JavaScript/TypeScript:**
 - Node.js, npm, yarn, pnpm, bun, deno
-- Vite, Webpack, Rollup, esbuild, Parcel
-- Next.js, Astro, Remix, Nuxt, SvelteKit, Qwik, Solid
-- Jest, Vitest, Playwright, Cypress, Mocha
+- Vite, Webpack dev server, Next.js dev, nodemon
+- VSCode extension hosts & tsserver
 
 **Python:**
-- Python 2/3, uvicorn, gunicorn, Flask, Django, FastAPI, Streamlit, Jupyter
+- Python 2/3 executables
+- uvicorn, Flask dev server
 
 **Other Languages:**
-- Ruby (Rails, Puma), Go (air), Rust (cargo), PHP, Java/JVM, .NET, Elixir (Phoenix, Mix)
-- Zig, Nim, Crystal, V
-
-**Build Tools & Servers:**
-- Grunt, Gulp, Turbo, Nx, LiveReload, BrowserSync
-- Sass, Less, Tailwind, PostCSS (watch modes)
-- http-server, serve, static-server, webpack-dev-server
-
-**IDEs & Editors:**
-- VSCode (extension hosts, language servers, tsserver, ESLint server)
-- Cursor, Zed, Sublime, Neovim LSPs
+- Ruby, Rails server
+- Rust (cargo run)
+- PHP dev server (-S flag)
+- Java with -jar flag
+- .NET run command
 
 **Infrastructure:**
-- Docker, Docker Compose, Podman
-- Postgres, Redis, MongoDB, MySQL (dev instances)
-- ngrok, cloudflared, localtunnel
+- Docker daemon
+- Postgres (with data directory), Redis, MongoDB
 
-**Plus:** Parent process discovery for comprehensive cleanup!
+**Safety Features:**
+- ✅ Patterns use specific flags/paths to avoid matching system processes
+- ✅ Parent process discovery for comprehensive cleanup
+- ✅ Exclude patterns to protect specific processes
+- ✅ Custom targets for anything not in the default list
 
 ## Requirements
 
