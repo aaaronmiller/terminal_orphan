@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ---
-# title: Enhanced Dev Server Killer - Full Featured Edition
+# title: Terminal Orphan Killer - Full Featured Edition
 # date: 2025-11-04 00:00:00 UTC
-# ver: 2.8.0
+# ver: 3.0.0
 # author: Sliither
 # model: Claude Sonnet 4.5
 # tags: [bash, process-management, debugging, dev-tools, process-killer, pattern-matching, pgrep, terminal]
@@ -28,6 +28,9 @@ FORCE=0
 EXCLUDE_PATTERN=""
 LOG_FILE=""
 NO_COLOR=0
+USE_SIGKILL=0
+USE_SUDO=0
+USE_ELEVATED=0
 
 # Shell color constants (will be disabled if --no-color is set)
 RED='\033[0;31m'
@@ -82,8 +85,11 @@ show_usage() {
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-p, --ports${NC}           Show port usage")" "• VSCode extension hosts & language servers"
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-t 'pattern'${NC}       Custom target")" "• Docker containers & compose"
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-H, --history${NC}       Browse target history")" "• Ruby/Go/Rust/PHP dev servers"
-    printf "  %-40s %s\n" "$(echo -e "${YELLOW}--nuke${NC}              Process all history")" "• Database dev instances"
-    printf "  %-40s %s\n" "$(echo -e "${YELLOW}-d, --debug${NC}         Show debug info")" "• ANY process listening on dev ports"
+    printf "  %-40s %s\\n" "$(echo -e "${YELLOW}--nuke${NC}              Process all history")" "• Database dev instances"
+    printf "  %-40s %s\\n" "$(echo -e "${YELLOW}-9, --kill9${NC}        Immediate SIGKILL (skip graceful TERM)")" ""
+    printf "  %-40s %s\\n" "$(echo -e "${YELLOW}-E, --elevated${NC}    Maximum: sudo kill -9 (skip TERM+KILL)")" ""
+    printf "  %-40s %s\\n" "$(echo -e "${YELLOW}-S, --sudo${NC}         Use sudo for kill commands")" ""
+    printf "  %-40s %s\\n" "$(echo -e "${YELLOW}-d, --debug${NC}         Show debug info")" "• ANY process listening on dev ports"
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-q, --quiet${NC}         Suppress header/verbose output")" "• Parent process discovery"
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-f, --force${NC}         Skip confirmation prompts")" ""
     printf "  %-40s %s\n" "$(echo -e "${YELLOW}-e 'pattern'${NC}     Exclude matching processes")" ""
@@ -118,6 +124,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --nuke)
             NUKE=1
+            shift
+            ;;
+        -9|--kill9)
+            USE_SIGKILL=1
+            shift
+            ;;
+        -E|--elevated)
+            USE_ELEVATED=1
+            shift
+            ;;
+        -S|--sudo)
+            USE_SUDO=1
             shift
             ;;
         -d|--debug)
@@ -171,6 +189,15 @@ done
 # Quiet mode suppresses header
 [[ $QUIET -eq 1 ]] && SHOW_HEADER=0
 
+# Pre-validate sudo if requested
+if [[ $USE_SUDO -eq 1 && $EUID -ne 0 ]]; then
+    echo "🔐 Validating sudo credentials..."
+    if ! sudo -v; then
+        echo -e "${RED}❌ Sudo authentication failed. Proceeding without sudo.${NC}"
+        USE_SUDO=0
+    fi
+fi
+
 # --- Setup ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HISTORY_FILE="$SCRIPT_DIR/terminal_orphan_targets.txt"
@@ -184,6 +211,468 @@ HISTORY_FILE="$SCRIPT_DIR/terminal_orphan_targets.txt"
 if [[ -n "$CUSTOM_TARGET" ]]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') $CUSTOM_TARGET" >> "$HISTORY_FILE"
 fi
+
+kill_process() {
+    local pid=$1
+    local sig=$2
+    if [[ $USE_SUDO -eq 1 && $EUID -ne 0 ]]; then
+        sudo kill "-$sig" "$pid" 2>/dev/null || true
+    else
+        kill "-$sig" "$pid" 2>/dev/null || true
+    fi
+}
+
+elevated_kill() {
+    local pid=$1
+    local sig="${2:-KILL}"
+    sudo kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+proc_exists() {
+    local pid=$1
+    if [[ $USE_SUDO -eq 1 && $EUID -ne 0 ]]; then
+       sudo kill -0 "$pid" 2>/dev/null
+    else
+        kill -0 "$pid" 2>/dev/null
+    fi
+}
+
+proc_exists_elevated() {
+    local pid=$1
+    sudo kill -0 "$pid" 2>/dev/null
+}
+
+# 3-step escalation: TERM → KILL → sudo kill -9 (+ optional elevated)
+# Returns 0 if dead, 1 if survived all steps
+# Pass --elevated to try elevated_kill after sudo kill -9
+escalate_kill() {
+    local pid=$1
+    local use_elevated=${2:-$USE_ELEVATED}
+
+    # If --elevated / -E was passed, skip straight to sudo kill -9
+    if [[ $use_elevated -eq 1 ]]; then
+        elevated_kill "$pid" KILL
+        sleep 0.3
+        proc_exists_elevated "$pid" && return 1 || return 0
+    fi
+
+    kill_process "$pid" TERM
+    sleep 0.3
+    if proc_exists "$pid"; then
+        kill_process "$pid" KILL
+        sleep 0.2
+    fi
+    if proc_exists "$pid"; then
+        elevated_kill "$pid" KILL
+        sleep 0.3
+    fi
+
+    # Ultimate fallback: if USE_SUDO and still alive, try SIGQUIT
+    if [[ $USE_SUDO -eq 1 ]] && proc_exists_elevated "$pid"; then
+        elevated_kill "$pid" QUIT 2>/dev/null || true
+        sleep 0.3
+    fi
+
+    # Check existence — prefer elevated check if we've been using sudo
+    if [[ $USE_SUDO -eq 1 ]]; then
+        proc_exists_elevated "$pid" && return 1 || return 0
+    else
+        proc_exists "$pid" && return 1 || return 0
+    fi
+}
+
+draw_kill_list() {
+    # _ic_cmd, _ic_cpu, _ic_mem, killed_count, total — all from interactive_kill_select scope
+    local selected=$1
+    local -n _km=$2
+    local i=0
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 120)
+    local max_cmd=$(( cols - 40 ))
+    [[ $max_cmd -lt 15 ]] && max_cmd=15
+
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        local src="${pid_sources[$pid]:-?}"
+        local cmd="${_ic_cmd[$pid]:-[ended]}"
+        local cpu="${_ic_cpu[$pid]:-?}"
+        local mem="${_ic_mem[$pid]:-?}"
+        [[ ${#cmd} -gt $max_cmd ]] && cmd="${cmd:0:$max_cmd}…"
+        local status="${_km[$pid]:-}"
+        local level="${_kl[$pid]:-}"
+
+        printf '\033[2K\r'
+        case "$status" in
+            ok)
+                printf "  ${GREEN}✓ killed ${NC}%-7s %-12s %s\n" \
+                    "$pid" "$src" "$cmd" ;;
+            ok9)
+                printf "  ${GREEN}✓ -9     ${NC}%-7s %-12s %s\n" \
+                    "$pid" "$src" "$cmd" ;;
+            okelev)
+                printf "  ${GREEN}✓ elev   ${NC}%-7s %-12s %s\n" \
+                    "$pid" "$src" "$cmd" ;;
+            failed)
+                printf "  ${RED}✗ alive! ${NC}%-7s %-12s %s\n" \
+                    "$pid" "$src" "$cmd" ;;
+            killing)
+                printf "  ${YELLOW}… wait   ${NC}%-7s %-12s %s\n" \
+                    "$pid" "$src" "$cmd" ;;
+            *)
+                # Show the kill level indicator for the selected item
+                if [[ $i -eq $selected ]]; then
+                    local lvl_str=""
+                    case "${level:-normal}" in
+                        normal) lvl_str="${DIM}[TERM]${NC}" ;;
+                        sigkill) lvl_str="${YELLOW}[-9]${NC}" ;;
+                        elevated) lvl_str="${RED}[ELEV]${NC}" ;;
+                    esac
+                    printf "  ${CYAN}${BOLD}▶${NC} %s ${CYAN}%-7s %-12s${NC} ${DIM}cpu:%-4s mem:%-4s${NC} ${CYAN}%s${NC}\n" \
+                        "$lvl_str" "$pid" "$src" "$cpu" "$mem" "$cmd"
+                else
+                    printf "    ${DIM}pending ${NC}%-7s %-12s ${DIM}cpu:%-4s mem:%-4s${NC} %s\n" \
+                        "$pid" "$src" "$cpu" "$mem" "$cmd"
+                fi ;;
+        esac
+        ((i++))
+    done
+
+    # Footer: progress counter + controls (always the last line of the block)
+    printf '\033[2K\r'
+    printf "  ${DIM}killed %d/%d  ·  Enter=kill 9=kill9  E=elevated  y=all  q=done${NC}\n" \
+        "${killed_count:-0}" "${total:-0}"
+}
+
+interactive_kill_select() {
+    # Global cache: one ps call populates these, draw_kill_list reads them
+    declare -g -A _ic_cmd _ic_cpu _ic_mem _kl
+
+    _ic_load_cache() {
+        local pid_csv
+        pid_csv=$(printf '%s,' "${UNIQUE_PIDS[@]}")
+        pid_csv="${pid_csv%,}"
+        [[ -z "$pid_csv" ]] && return
+        # Single ps call for all pids; last field (command) may contain spaces
+        while read -r p cpu mem cmd; do
+            [[ -z "$p" ]] && continue
+            _ic_cmd[$p]="$cmd"
+            _ic_cpu[$p]="$cpu"
+            _ic_mem[$p]="$mem"
+            # Initialize kill level if not set
+            [[ -z "${_kl[$p]:-}" ]] && _kl[$p]="normal"
+        done < <(ps --no-headers -p "$pid_csv" -o pid,pcpu,pmem,command 2>/dev/null || true)
+    }
+
+    local selected=0
+    local total=${#UNIQUE_PIDS[@]}
+    declare -A killed_map
+    local killed_count=0
+    local list_lines=$(( total + 1 ))  # list rows + footer row
+
+    # Initialize kill levels for all pids
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        _kl[$pid]="normal"
+    done
+
+    _ic_load_cache
+
+    tput civis 2>/dev/null
+    trap 'tput cnorm 2>/dev/null' RETURN INT TERM
+
+    echo ""
+    draw_kill_list "$selected" killed_map
+
+    _ic_redraw() {
+        printf '\033[%dA' "$list_lines"
+        draw_kill_list "$selected" killed_map
+    }
+
+    while true; do
+        local k1 k2
+        IFS= read -r -s -n1 k1
+
+        if [[ "$k1" == $'\x1b' ]]; then
+            IFS= read -r -s -n2 -t 0.05 k2
+            case "$k2" in
+                '[A'|'[D')  # up / left
+                    [[ $selected -gt 0 ]] && ((selected--)) ;;
+                '[B'|'[C')  # down / right
+                    [[ $selected -lt $((total-1)) ]] && ((selected++)) ;;
+            esac
+
+        elif [[ "$k1" == '' || "$k1" == $'\n' || "$k1" == $'\r' ]]; then
+            # Kill selected with current kill level
+            local pid="${UNIQUE_PIDS[$selected]}"
+            if [[ -z "${killed_map[$pid]:-}" ]]; then
+                local lvl="${_kl[$pid]:-normal}"
+                killed_map[$pid]="killing"
+                _ic_redraw
+
+                local ok=false
+                case "$lvl" in
+                    normal)
+                        if escalate_kill "$pid" 0; then ok=true; fi ;;
+                    sigkill)
+                        kill_process "$pid" KILL
+                        sleep 0.3
+                        proc_exists "$pid" || ok=true
+                        if ! $ok && [[ $USE_SUDO -eq 1 ]]; then
+                            elevated_kill "$pid" KILL
+                            sleep 0.3
+                            proc_exists "$pid" || ok=true
+                        fi
+                        ;;
+                    elevated)
+                        elevated_kill "$pid" KILL
+                        sleep 0.3
+                        proc_exists_elevated "$pid" || ok=true
+                        if ! $ok; then
+                            elevated_kill "$pid" QUIT
+                            sleep 0.3
+                            proc_exists_elevated "$pid" || ok=true
+                        fi
+                        ;;
+                esac
+
+                if $ok; then
+                    case "$lvl" in
+                        normal)   killed_map[$pid]="ok" ;;
+                        sigkill)  killed_map[$pid]="ok9" ;;
+                        elevated) killed_map[$pid]="okelev" ;;
+                    esac
+                    ((killed_count++))
+                else
+                    killed_map[$pid]="failed"
+                fi
+                _ic_load_cache
+                # Advance to next unkilled
+                local found=0
+                for ((j=selected+1; j<total; j++)); do
+                    [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; found=1; break; }
+                done
+                if [[ $found -eq 0 ]]; then
+                    for ((j=0; j<selected; j++)); do
+                        [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; found=1; break; }
+                    done
+                fi
+                _ic_redraw
+                # All processed — break only if every item has a result
+                local pending=0
+                for p in "${UNIQUE_PIDS[@]}"; do [[ -z "${killed_map[$p]:-}" ]] && ((pending++)); done
+                [[ $pending -eq 0 ]] && break
+            fi
+
+        elif [[ "$k1" == '1' ]]; then
+            # Toggle kill level for selected: normal → sigkill
+            local pid="${UNIQUE_PIDS[$selected]}"
+            [[ -z "${killed_map[$pid]:-}" ]] && _kl[$pid]="normal"
+            _ic_redraw
+
+        elif [[ "$k1" == '2' ]]; then
+            # Toggle kill level for selected: normal → sigkill
+            local pid="${UNIQUE_PIDS[$selected]}"
+            [[ -z "${killed_map[$pid]:-}" ]] && _kl[$pid]="sigkill"
+            _ic_redraw
+
+        elif [[ "$k1" == '3' ]]; then
+            # Toggle kill level for selected: normal → elevated
+            local pid="${UNIQUE_PIDS[$selected]}"
+            [[ -z "${killed_map[$pid]:-}" ]] && _kl[$pid]="elevated"
+            _ic_redraw
+
+        elif [[ "$k1" == '9' ]]; then
+            # SIGKILL on selected (shortcut)
+            local pid="${UNIQUE_PIDS[$selected]}"
+            if [[ -z "${killed_map[$pid]:-}" ]]; then
+                _kl[$pid]="sigkill"
+                killed_map[$pid]="killing"
+                _ic_redraw
+
+                kill_process "$pid" KILL
+                sleep 0.3
+                local ok=false
+                proc_exists "$pid" || ok=true
+                if ! $ok; then
+                    elevated_kill "$pid" KILL
+                    sleep 0.3
+                    proc_exists "$pid" || ok=true
+                fi
+
+                if $ok; then
+                    killed_map[$pid]="ok9"
+                    ((killed_count++))
+                else
+                    killed_map[$pid]="failed"
+                fi
+                _ic_load_cache
+                local found=0
+                for ((j=selected+1; j<total; j++)); do
+                    [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; found=1; break; }
+                done
+                [[ $found -eq 0 ]] && for ((j=0; j<selected; j++)); do
+                    [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; break; }
+                done
+                _ic_redraw
+                local pending=0
+                for p in "${UNIQUE_PIDS[@]}"; do [[ -z "${killed_map[$p]:-}" ]] && ((pending++)); done
+                [[ $pending -eq 0 ]] && break
+            fi
+
+        elif [[ "$k1" == 'e' || "$k1" == 'E' ]]; then
+            # Elevated kill on selected (sudo kill -9)
+            local pid="${UNIQUE_PIDS[$selected]}"
+            if [[ -z "${killed_map[$pid]:-}" ]]; then
+                _kl[$pid]="elevated"
+                killed_map[$pid]="killing"
+                _ic_redraw
+
+                local ok=false
+                elevated_kill "$pid" KILL
+                sleep 0.3
+                proc_exists_elevated "$pid" || ok=true
+                if ! $ok; then
+                    elevated_kill "$pid" QUIT
+                    sleep 0.3
+                    proc_exists_elevated "$pid" || ok=true
+                fi
+
+                if $ok; then
+                    killed_map[$pid]="okelev"
+                    ((killed_count++))
+                else
+                    killed_map[$pid]="failed"
+                fi
+                _ic_load_cache
+                local found=0
+                for ((j=selected+1; j<total; j++)); do
+                    [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; found=1; break; }
+                done
+                [[ $found -eq 0 ]] && for ((j=0; j<selected; j++)); do
+                    [[ -z "${killed_map[${UNIQUE_PIDS[$j]}]:-}" ]] && { selected=$j; break; }
+                done
+                _ic_redraw
+                local pending=0
+                for p in "${UNIQUE_PIDS[@]}"; do [[ -z "${killed_map[$p]:-}" ]] && ((pending++)); done
+                [[ $pending -eq 0 ]] && break
+            fi
+
+        elif [[ "$k1" == 'y' || "$k1" == 'Y' ]]; then
+            # Kill all pending with their CURRENT kill levels
+            # First show all as "killing"
+            for p in "${UNIQUE_PIDS[@]}"; do
+                [[ -z "${killed_map[$p]:-}" ]] && killed_map[$p]="killing"
+            done
+            _ic_redraw
+
+            # Phase 1: normal TERM kills
+            local normal_pids=()
+            local sigkill_pids=()
+            local elevated_pids=()
+            for p in "${UNIQUE_PIDS[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                case "${_kl[$p]:-normal}" in
+                    normal)   normal_pids+=("$p") ;;
+                    sigkill)  sigkill_pids+=("$p") ;;
+                    elevated) elevated_pids+=("$p") ;;
+                esac
+            done
+
+            # Normal: TERM
+            for p in "${normal_pids[@]}"; do kill_process "$p" TERM; done
+            sleep 1
+            for p in "${normal_pids[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                proc_exists "$p" && kill_process "$p" KILL
+            done
+            sleep 0.3
+            for p in "${normal_pids[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                proc_exists "$p" && elevated_kill "$p" KILL || true
+            done
+            sleep 0.3
+
+            # SIGKILL: skip TERM, go straight to KILL + sudo fallback
+            for p in "${sigkill_pids[@]}"; do kill_process "$p" KILL; done
+            sleep 0.3
+            for p in "${sigkill_pids[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                proc_exists "$p" && elevated_kill "$p" KILL || true
+            done
+            sleep 0.3
+
+            # Elevated: sudo kill -9
+            for p in "${elevated_pids[@]}"; do elevated_kill "$p" KILL; done
+            sleep 0.3
+            for p in "${elevated_pids[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                proc_exists_elevated "$p" && elevated_kill "$p" QUIT || true
+            done
+            sleep 0.3
+
+            # Check results
+            local all_pids=( "${normal_pids[@]}" "${sigkill_pids[@]}" "${elevated_pids[@]}" )
+            for p in "${all_pids[@]}"; do
+                [[ "${killed_map[$p]:-}" != "killing" ]] && continue
+                local survivor=false
+                case "${_kl[$p]:-normal}" in
+                    normal|sigkill) proc_exists "$p" && survivor=true || true ;;
+                    elevated) proc_exists_elevated "$p" && survivor=true || true ;;
+                esac
+                if $survivor; then killed_map[$p]="failed"
+                else
+                    case "${_kl[$p]:-normal}" in
+                        normal)   killed_map[$p]="ok" ;;
+                        sigkill)  killed_map[$p]="ok9" ;;
+                        elevated) killed_map[$p]="okelev" ;;
+                    esac
+                    ((killed_count++))
+                fi
+            done
+            _ic_load_cache
+            _ic_redraw
+            break
+
+        elif [[ "$k1" == 'q' || "$k1" == 'Q' || "$k1" == $'\x03' ]]; then
+            _ic_redraw
+            tput cnorm 2>/dev/null
+            echo ""
+            if [[ $killed_count -eq 0 ]]; then
+                echo "🚫 Nothing killed. Exited."
+            else
+                local left=$(( total - killed_count ))
+                echo -e "✅ ${GREEN}Done. Killed ${killed_count} of ${total}.${NC}"
+                [[ $left -gt 0 ]] && echo -e "   ${DIM}${left} process(es) left running.${NC}"
+            fi
+            return 0
+        fi
+
+        _ic_redraw
+    done
+
+    tput cnorm 2>/dev/null
+    echo ""
+
+    local survivors=()
+    for p in "${UNIQUE_PIDS[@]}"; do
+        [[ "${killed_map[$p]:-}" == "failed" ]] && survivors+=("$p")
+    done
+
+    if [[ ${#survivors[@]} -eq 0 ]]; then
+        echo -e "✅ ${GREEN}All ${killed_count} process(es) terminated.${NC}"
+        echo -e "🌡️  ${CYAN}Your system should cool down now...${NC}"
+    else
+        echo -e "✅ ${GREEN}${killed_count} terminated.${NC}  ${YELLOW}⚠️  ${#survivors[@]} survived all kill levels${NC}"
+        for p in "${survivors[@]}"; do
+            echo -e "   ${RED}PID $p: ${_ic_cmd[$p]:-[unknown]}${NC}"
+        done
+        echo -e "${DIM}   Try: re-run with --sudo${NC}"
+    fi
+
+    if [[ -n "$LOG_FILE" ]]; then
+        echo "" >> "$LOG_FILE"
+        echo "# Kill completed at: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
+        echo "# Killed: $killed_count  Survivors: ${#survivors[@]}" >> "$LOG_FILE"
+    fi
+}
 
 process_and_kill() {
 # --- Process Discovery ---
@@ -223,6 +712,22 @@ else
         ["vscode-ext"]="extensionHost"
         ["vscode-ts"]="tsserver"
 
+        # Ollama (local LLM server — runs as 'ollama' user)
+        ["ollama"]="ollama serve"
+        ["ollama-proc"]="bin/ollama"
+
+        # Headroom compression proxy + RTK
+        ["headroom"]="headroom proxy"
+        ["rtk"]="/rtk"
+
+        # Watchers / daemons
+        ["ramwatch"]="ramwatch-daemon"
+        ["watchman"]="watchman"
+
+        # Claude Code CLI and MCP processes
+        ["claude"]="claude --"
+        ["context7"]="context7-mcp"
+
         # JavaScript tooling
         ["vite"]="/vite"
         ["webpack"]="webpack-dev-server"
@@ -248,6 +753,19 @@ else
         ["postgres"]="postgres -D" # Postgres with data directory
         ["redis"]="redis-server"
         ["mongodb"]="mongod"
+
+        # Python scripts (running .py files directly)
+        ["py-script"]="python.* .*\.py"
+
+        # Shell scripts
+        ["sh-script"]="bash .*\.sh"
+
+        # Named launchers and proxies
+        ["start_proxy"]="start_proxy"
+
+        # Claude Code CLI and MCP processes
+        ["claude"]="claude --"
+        ["context7"]="context7-mcp"
     )
 
     # Calculate how many lines we need (3 columns per line)
@@ -354,6 +872,33 @@ else
     fi
     
     echo "" # Spacer after port scan
+
+    # User TTY sweep: anything the user explicitly started in a terminal
+    echo -e "${MAGENTA}▶ Scanning user-started TTY processes...${NC}"
+    tty_pids_found=0
+    while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        [[ "$pid" == "$$" || "$pid" == "$PPID" ]] && continue
+        [[ -n "${pid_sources[$pid]:-}" ]] && continue
+        local tty_cmd
+        tty_cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+        # Skip bare interactive shells
+        [[ "$tty_cmd" =~ ^-?(zsh|bash|sh|fish)(\ -l)?$ ]] && continue
+        # Skip this script
+        [[ "$tty_cmd" =~ terminal_orphan ]] && continue
+        # Skip exclude pattern
+        [[ -n "$EXCLUDE_PATTERN" && "$tty_cmd" =~ $EXCLUDE_PATTERN ]] && continue
+        TARGET_PIDS+=("$pid")
+        pid_sources["$pid"]="user-tty"
+        ((tty_pids_found++))
+    done < <(ps -u "$USER" --no-headers -o pid,tty 2>/dev/null | awk '$2 != "?" {print $1}')
+
+    if [[ $tty_pids_found -gt 0 ]]; then
+        echo -e "  ${GREEN}Found ${tty_pids_found} user TTY process(es)${NC}"
+    else
+        echo -e "  ${DIM}No additional user TTY processes found${NC}"
+    fi
+    echo ""
 fi
 
 # --- Parent Process Discovery ---
@@ -468,17 +1013,6 @@ fi
 
 echo -e "${BOLD}🎯 Found ${#UNIQUE_PIDS[@]} process(es) to terminate:${NC}"
 echo ""
-printf "  %-8s %-8s %-15s %s\n" "PID" "PPID" "SOURCE" "COMMAND"
-printf "  %-8s %-8s %-15s %s\n" "---" "----" "------" "-------"
-
-for pid in "${UNIQUE_PIDS[@]}"; do
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
-    source="${pid_sources[$pid]:-unknown}"
-    cmd=$(ps -o command= -p "$pid" 2>/dev/null | head -c 60 || echo "?")
-    printf "  %-8s %-8s %-15s %s\n" "$pid" "$ppid" "$source" "$cmd"
-done
-
-echo "" # Spacer
 
 # Initialize log file if provided
 if [[ -n "$LOG_FILE" ]]; then
@@ -492,90 +1026,78 @@ if [[ -n "$LOG_FILE" ]]; then
         ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
         source="${pid_sources[$pid]:-unknown}"
         cmd=$(ps -o command= -p "$pid" 2>/dev/null || echo "?")
-        printf "%-8s %-8s %-15s %s\n" "$pid" "$ppid" "$source" "$cmd" >> "$LOG_FILE"
+        cpu=$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
+        mem=$(ps -o %mem= -p "$pid" 2>/dev/null | tr -d ' ' || echo "?")
+        printf "%-8s %-8s %-15s cpu:%-5s mem:%-5s\n" "$pid" "$ppid" "$source" "$cpu%" "$mem%" >> "$LOG_FILE"
+        printf "  %s\n" "$cmd" >> "$LOG_FILE"
     done
     echo "" >> "$LOG_FILE"
 fi
 
 if (( DRY_RUN )); then
+    printf "  %-7s %-12s %-6s %-6s %s\n" "PID" "SOURCE" "CPU%" "MEM%" "COMMAND"
+    printf "  %-7s %-12s %-6s %-6s %s\n" "---" "------" "----" "----" "-------"
+    local cols
+    cols=$(tput cols 2>/dev/null || echo 120)
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        local dr_ppid dr_src dr_cmd dr_cpu dr_mem
+        dr_src="${pid_sources[$pid]:-?}"
+        read -r dr_cpu dr_mem dr_cmd <<< "$(ps --no-headers -p "$pid" -o pcpu,pmem,command 2>/dev/null || echo "? ? ?")"
+        [[ ${#dr_cmd} -gt $((cols-36)) ]] && dr_cmd="${dr_cmd:0:$((cols-37))}…"
+        printf "  %-7s %-12s %-6s %-6s %s\n" "$pid" "$dr_src" "$dr_cpu" "$dr_mem" "$dr_cmd"
+    done
+    echo ""
     echo -e "🔍 ${YELLOW}[DRY RUN]${NC} No processes were harmed."
     echo -e "${DIM}   Remove -n flag to actually kill these processes.${NC}"
     [[ -n "$LOG_FILE" ]] && echo -e "${DIM}   Log written to: $LOG_FILE${NC}"
     exit 0
 fi
 
-# Skip confirmation if --force is set
-if [[ $FORCE -eq 0 ]]; then
-    read -p "❓ Kill these processes? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "🚫 Operation cancelled."
-        exit 0
-    fi
-else
-    echo -e "${YELLOW}⚡ Force mode enabled - skipping confirmation${NC}"
-fi
-
-echo "💀 Terminating processes gracefully (TERM)..."
 [[ -n "$LOG_FILE" ]] && echo "# Kill started at: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
-for pid in "${UNIQUE_PIDS[@]}"; do
-    kill -TERM "$pid" 2>/dev/null || true
-done
 
-sleep 2
-
-declare -a survivors=()
-for pid in "${UNIQUE_PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-        survivors+=("$pid")
-    fi
-done
-
-if [[ ${#survivors[@]} -gt 0 ]]; then
-    echo "💥 Force killing ${#survivors[@]} stubborn process(es) (KILL)..."
-    for pid in "${survivors[@]}"; do
-        kill -KILL "$pid" 2>/dev/null || true
-    done
-    sleep 0.5
-fi
-
-# Final check
-final_survivors=()
-for pid in "${UNIQUE_PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-        final_survivors+=("$pid")
-    fi
-done
-
-echo ""
-if [[ ${#final_survivors[@]} -eq 0 ]]; then
-    echo "✅ ${GREEN}All processes terminated successfully!${NC}"
-    echo "🌡️  ${CYAN}Your laptop should cool down now...${NC}"
-
-    # Log success
-    if [[ -n "$LOG_FILE" ]]; then
-        echo "" >> "$LOG_FILE"
-        echo "# Kill completed at: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
-        echo "# Result: SUCCESS - All ${#UNIQUE_PIDS[@]} process(es) terminated" >> "$LOG_FILE"
-    fi
+if [[ $FORCE -eq 0 ]]; then
+    interactive_kill_select
 else
-    echo "⚠️  ${YELLOW}Warning: ${#final_survivors[@]} process(es) survived:${NC}"
-    for pid in "${final_survivors[@]}"; do
-        cmd=$(ps -o command= -p "$pid" 2>/dev/null || echo "?")
-        echo "   PID $pid: $cmd"
+    echo -e "${YELLOW}⚡ Force mode - killing all ${#UNIQUE_PIDS[@]} process(es)...${NC}"
+    local sig="TERM"
+    [[ $USE_SIGKILL -eq 1 ]] && sig="KILL"
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        kill_process "$pid" "$sig"
     done
-    echo "${DIM}   These may require sudo or are protected by the system.${NC}"
+    [[ "$sig" == "TERM" ]] && sleep 1
+    sleep 0.3
 
-    # Log survivors
-    if [[ -n "$LOG_FILE" ]]; then
-        echo "" >> "$LOG_FILE"
-        echo "# Kill completed at: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE"
-        echo "# Result: PARTIAL - ${#final_survivors[@]} process(es) survived" >> "$LOG_FILE"
-        echo "# Survivors:" >> "$LOG_FILE"
-        for pid in "${final_survivors[@]}"; do
-            cmd=$(ps -o command= -p "$pid" 2>/dev/null || echo "?")
-            echo "#   PID $pid: $cmd" >> "$LOG_FILE"
+    declare -a force_survivors=()
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        proc_exists "$pid" && force_survivors+=("$pid")
+    done
+    if [[ ${#force_survivors[@]} -gt 0 ]]; then
+        echo "💥 SIGKILL on ${#force_survivors[@]} stubborn process(es)..."
+        for pid in "${force_survivors[@]}"; do
+            kill_process "$pid" KILL
         done
+        sleep 0.5
+    fi
+
+    declare -a final_survivors=()
+    for pid in "${UNIQUE_PIDS[@]}"; do
+        proc_exists "$pid" && final_survivors+=("$pid")
+    done
+
+    echo ""
+    if [[ ${#final_survivors[@]} -eq 0 ]]; then
+        echo -e "✅ ${GREEN}All processes terminated successfully!${NC}"
+        echo -e "🌡️  ${CYAN}Your system should cool down now...${NC}"
+        [[ -n "$LOG_FILE" ]] && { echo "" >> "$LOG_FILE"; echo "# Result: SUCCESS" >> "$LOG_FILE"; }
+    else
+        echo -e "⚠️  ${YELLOW}${#final_survivors[@]} process(es) survived SIGKILL:${NC}"
+        for pid in "${final_survivors[@]}"; do
+            local fcmd
+            fcmd=$(ps -o command= -p "$pid" 2>/dev/null || echo "?")
+            echo "   PID $pid: $fcmd"
+        done
+        echo -e "${DIM}   Try re-running with --sudo${NC}"
+        [[ -n "$LOG_FILE" ]] && { echo "" >> "$LOG_FILE"; echo "# Result: PARTIAL" >> "$LOG_FILE"; }
     fi
 fi
 

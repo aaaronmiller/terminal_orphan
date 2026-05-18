@@ -74,7 +74,23 @@ Kill all dev processes:
 - `-f, --force`: Skip confirmation prompts (useful for automation)
 - `-e 'pattern', --exclude 'pattern'`: Exclude processes matching pattern from kill list
 - `-l 'file', --log 'file'`: Save killed processes log to specified file
+- `-9, --kill9`: Immediate SIGKILL (-9), skip graceful TERM
+- `-E, --elevated`: Maximum force - uses `sudo kill -9`, skips TERM and regular KILL
+- `-S, --sudo`: Use `sudo` for all kill commands
 - `--no-color`: Disable colored output (useful for piping/logging)
+
+**Kill Level Options:**
+- `-9, --kill9`: Immediate SIGKILL (-9), skip graceful TERM
+- `-E, --elevated`: Maximum force - uses `sudo kill -9`, skips TERM and regular KILL
+- `-S, --sudo`: Use `sudo` for all kill commands
+
+**Interactive Mode Controls:**
+- `Enter`: Kill selected process with normal escalation (TERM → KILL → sudo kill -9)
+- `1/2/3`: Set kill level for selected process (normal/sigkill/elevated)
+- `9`: Immediately SIGKILL (-9) the selected process
+- `E`: Immediately elevated kill (sudo kill -9) the selected process
+- `y`: Kill ALL processes, each with their current kill level
+- `q`: Quit
 
 **Advanced Options:**
 - `-d, --debug`: Show debug information during scanning
@@ -174,6 +190,9 @@ Terminal Orphan Killer safely detects and can terminate ~30 common development p
 **Infrastructure:**
 - Docker daemon
 - Postgres (with data directory), Redis, MongoDB
+- Ollama (local LLM server)
+- Headroom compression proxy
+- RTK context compression tool
 
 **Safety Features:**
 - ✅ Patterns use specific flags/paths to avoid matching system processes
