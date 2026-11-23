@@ -8,7 +8,7 @@
 
 ## Goal
 
-Build a **Bubble Tea (Go) TUI launcher** for the curated scripts in `/home/cheta/code/scripts/` that:
+Build a **Bubble Tea (Go) TUI launcher** for the curated scripts in `~/code/scripts/` that:
 - Shows only **useful, functional scripts** (not deprecated/duplicate junk)
 - Displays **description**, **usage examples**, and **available arguments** for each script
 - Allows **quick execution** with argument input
@@ -19,7 +19,7 @@ Build a **Bubble Tea (Go) TUI launcher** for the curated scripts in `/home/cheta
 
 ## Current Context
 
-- Scripts location: `/home/cheta/code/scripts/` (~473 files, ~45 are actually useful)
+- Scripts location: `~/code/scripts/` (~473 files, ~45 are actually useful)
 - User environment: WSL2 on Windows 11, HP Spectre 16"
 - Existing launcher: None (just raw CLI aliases in `.zshrc`)
 - Script metadata: Descriptions exist as comments in scripts (`# description` pattern)
@@ -85,7 +85,7 @@ scripts-launcher/
      - Description comment (`# description` or `# Purpose:`)
      - Usage examples (`# Usage:`)
      - Arguments (`# Args:` or `# Arguments:`)
-   - Extract from: `/home/cheta/code/scripts/*.sh`, `*.py`
+   - Extract from: `~/code/scripts/*.sh`, `*.py`
    - Store in `catalog.Catalog` struct
 
 3. **Create curated script list**

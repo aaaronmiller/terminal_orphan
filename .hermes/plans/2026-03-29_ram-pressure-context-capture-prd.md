@@ -597,7 +597,7 @@ class ProjectAssociator:
       }
     ],
     "vscode_state": {
-      "workspace": "/home/cheta/code/switchboard-tui",
+      "workspace": "~/code/switchboard-tui",
       "open_files": ["src/main.rs", "src/ui.rs"],
       "terminal_history": ["cargo build", "cargo run"]
     },
